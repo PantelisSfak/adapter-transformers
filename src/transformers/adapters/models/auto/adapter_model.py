@@ -19,6 +19,7 @@ ADAPTER_MODEL_MAPPING_NAMES = OrderedDict(
         ("gpt2", "GPT2AdapterModel"),
         ("t5", "T5AdapterModel"),
         ("vit", "ViTAdapterModel"),
+        ("electra","ElectraAdapterModel")
     ]
 )
 MODEL_WITH_HEADS_MAPPING_NAMES = OrderedDict(

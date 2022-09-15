@@ -24,6 +24,13 @@ import torch.utils.checkpoint
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from ...adapters.mixins.electra import (
+    ElectraModelAdaptersMixin,
+    ElectraModelWithHeadsAdaptersMixin,
+    ElectraOutputAdaptersMixin,
+    ElectraSelfOutputAdaptersMixin,
+)
+from ...adapters.prefix_tuning import PrefixTuningShim
 
 from ...activations import ACT2FN, get_activation
 from ...modeling_outputs import (
@@ -243,6 +250,8 @@ class ElectraSelfAttention(nn.Module):
 
         self.is_decoder = config.is_decoder
 
+        #self.prefix_tuning = PrefixTuningShim(location_key + "_prefix" if location_key else None, config)
+
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(new_x_shape)
@@ -344,7 +353,7 @@ class ElectraSelfAttention(nn.Module):
 
 
 # Copied from transformers.models.bert.modeling_bert.BertSelfOutput
-class ElectraSelfOutput(nn.Module):
+class ElectraSelfOutput(ElectraSelfOutputAdaptersMixin,nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -354,7 +363,8 @@ class ElectraSelfOutput(nn.Module):
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        #hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = self.adapter_layer_forward(hidden_states,input_tensor,self.LayerNorm)
         return hidden_states
 
 
@@ -425,7 +435,7 @@ class ElectraIntermediate(nn.Module):
 
 
 # Copied from transformers.models.bert.modeling_bert.BertOutput
-class ElectraOutput(nn.Module):
+class ElectraOutput(ElectraOutputAdaptersMixin,nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
@@ -435,7 +445,8 @@ class ElectraOutput(nn.Module):
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        #hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        hidden_states = self.adapter_layer_forward(hidden_states, input_tensor, self.LayerNorm)
         return hidden_states
 
 
@@ -807,7 +818,7 @@ ELECTRA_INPUTS_DOCSTRING = r"""
     "Both the generator and discriminator checkpoints may be loaded into this model.",
     ELECTRA_START_DOCSTRING,
 )
-class ElectraModel(ElectraPreTrainedModel):
+class ElectraModel(ElectraModelAdaptersMixin,ElectraPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.embeddings = ElectraEmbeddings(config)
@@ -1058,7 +1069,7 @@ class ElectraForSequenceClassification(ElectraPreTrainedModel):
     """,
     ELECTRA_START_DOCSTRING,
 )
-class ElectraForPreTraining(ElectraPreTrainedModel):
+class ElectraForPreTraining(ElectraModelWithHeadsAdaptersMixin,ElectraPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
@@ -1164,7 +1175,7 @@ class ElectraForPreTraining(ElectraPreTrainedModel):
     """,
     ELECTRA_START_DOCSTRING,
 )
-class ElectraForMaskedLM(ElectraPreTrainedModel):
+class ElectraForMaskedLM(ElectraModelWithHeadsAdaptersMixin,ElectraPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
@@ -1336,7 +1347,7 @@ class ElectraForTokenClassification(ElectraPreTrainedModel):
     """,
     ELECTRA_START_DOCSTRING,
 )
-class ElectraForQuestionAnswering(ElectraPreTrainedModel):
+class ElectraForQuestionAnswering(ElectraModelWithHeadsAdaptersMixin,ElectraPreTrainedModel):
     config_class = ElectraConfig
     base_model_prefix = "electra"
 

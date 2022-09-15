@@ -91,6 +91,16 @@ _import_structure = {
         "AutoAdapterModel",
         "AutoModelWithHeads",
     ],
+
+
+
+    "models.adapter_electra":[
+      "ElectraAdapterModel",
+       "ElectraModelWithHeads"
+    ],
+
+
+    
     "models.bart": [
         "BartAdapterModel",
         "BartModelWithHeads",
