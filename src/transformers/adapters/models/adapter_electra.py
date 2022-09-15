@@ -25,7 +25,7 @@ class ElectraAdapterModel(EmbeddingAdaptersWrapperMixin, ModelWithFlexibleHeadsA
     def __init__(self, config):
         super().__init__(config)
 
-        self.bert = ElectraModel(config)
+        self.electra = ElectraModel(config)
 
         self._init_head_modules()
 
@@ -59,7 +59,7 @@ class ElectraAdapterModel(EmbeddingAdaptersWrapperMixin, ModelWithFlexibleHeadsA
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.electra(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
