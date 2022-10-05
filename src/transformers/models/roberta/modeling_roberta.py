@@ -425,6 +425,7 @@ class RobertaLayer(nn.Module):
         head_mask: Optional[torch.FloatTensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
+        ghr_out: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
     ) -> Tuple[torch.Tensor]:
@@ -472,9 +473,18 @@ class RobertaLayer(nn.Module):
             cross_attn_present_key_value = cross_attention_outputs[-1]
             present_key_value = present_key_value + cross_attn_present_key_value
 
-        layer_output = apply_chunking_to_forward(
-            self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
-        )
+        #layer_output = apply_chunking_to_forward(
+        #   self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+        #)
+        
+        intermediate_output = self.intermediate(attention_output)
+        if ghr_out is not None:
+          attention_output = attention_output + ghr_out
+        layer_output = self.output(intermediate_output,attention_output)
+        
+        
+        
+        
         outputs = (layer_output,) + outputs
 
         # if decoder, return the attn key/values as the last output
@@ -495,6 +505,11 @@ class RobertaEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([RobertaLayer(config) for _ in range(config.num_hidden_layers)])
+        
+        self.robertalayer = RobertaLayer(config)
+        self.pe = nn.Embedding(12, config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.gradient_checkpointing = False
 
     def forward(
@@ -502,6 +517,7 @@ class RobertaEncoder(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.FloatTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
+        ghr_mask: Optional[torch.FloatTensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
@@ -516,6 +532,24 @@ class RobertaEncoder(nn.Module):
 
         next_decoder_cache = () if use_cache else None
         for i, layer_module in enumerate(self.layer):
+            
+            ghr_out = None
+            if i in [23,22]:
+                ghr_in = hidden_states.permute(1, 0, 2) # [seq_len, bsz, hidden]
+                input_shape = ghr_in.size()[:-1]
+                seq_length = input_shape[1]
+                pos_ids = torch.arange(seq_length, dtype=torch.long, device=ghr_in.device)
+                pos_ids = pos_ids.unsqueeze(0).expand(input_shape)
+                pos_embedding = self.pe(pos_ids)
+                ghr_in = ghr_in + pos_embedding
+                ghr_in = self.LayerNorm(ghr_in)
+                ghr_in = self.dropout(ghr_in)
+                
+                ghr_out = self.robertalayer(ghr_in, ghr_mask)
+                ghr_out = ghr_out[0].permute(1, 0, 2) #[bsz, seq_len, hidden]
+
+        
+        
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -543,16 +577,18 @@ class RobertaEncoder(nn.Module):
                     layer_head_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
+                    ghr_out,
                 )
             else:
                 layer_outputs = layer_module(
-                    hidden_states,
-                    attention_mask,
-                    layer_head_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    past_key_value,
-                    output_attentions,
+                    hidden_states = hidden_states,
+                    attention_mask = attention_mask,
+                    head_mask = layer_head_mask,
+                    encoder_hidden_states= encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    ghr_out = ghr_out,
+                    past_key_value = past_key_value,
+                    output_attentions = output_attentions,
                 )
 
             hidden_states = layer_outputs[0]
@@ -779,6 +815,7 @@ class RobertaModel(BertModelAdaptersMixin, RobertaPreTrainedModel):
         token_type_ids: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         head_mask: Optional[torch.Tensor] = None,
+        ghr_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
@@ -880,6 +917,7 @@ class RobertaModel(BertModelAdaptersMixin, RobertaPreTrainedModel):
             embedding_output,
             attention_mask=extended_attention_mask,
             head_mask=head_mask,
+            ghr_mask=ghr_mask,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_extended_attention_mask,
             past_key_values=past_key_values,
@@ -1510,7 +1548,16 @@ class RobertaForQuestionAnswering(BertModelWithHeadsAdaptersMixin, RobertaPreTra
         self.num_labels = config.num_labels
 
         self.roberta = RobertaModel(config, add_pooling_layer=False)
-        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
+        self.qa_outputs = nn.Linear(config.hidden_size*2, config.num_labels)
+        self.no_answer = nn.Linear(config.hidden_size*2, 1)
+        self.yes_no = nn.Linear(config.hidden_size*2, 3)
+        self.follow_up = nn.Linear(config.hidden_size*2, 3)
+        self.sigmoid = nn.Sigmoid()
+        self.softmax = nn.Softmax(dim=-1)
+        self.robertalayer = RobertaLayer(config)
+        self.pe = nn.Embedding(12,config.hidden_size)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1534,6 +1581,10 @@ class RobertaForQuestionAnswering(BertModelWithHeadsAdaptersMixin, RobertaPreTra
         inputs_embeds: Optional[torch.FloatTensor] = None,
         start_positions: Optional[torch.LongTensor] = None,
         end_positions: Optional[torch.LongTensor] = None,
+        no_answer: Optional[torch.Tensor] = None,
+        yes_no: Optional[torch.Tensor] = None,
+        follow_up: Optional[torch.Tensor] = None,
+        ghr_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1549,6 +1600,11 @@ class RobertaForQuestionAnswering(BertModelWithHeadsAdaptersMixin, RobertaPreTra
             are not taken into account for computing the loss.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        ghr_mask = ghr_mask.expand(input_ids.size(1), input_ids.size(0), input_ids.size(0))   # seq_len, bsz, bsz
+        ghr_mask = ghr_mask.unsqueeze(1)
+        ghr_mask = ghr_mask.to(
+            dtype=next(self.parameters()).dtype)  # fp16 compatibility
+        ghr_mask = (1.0 - ghr_mask) * -10000.0
 
         outputs = self.roberta(
             input_ids,
@@ -1556,18 +1612,55 @@ class RobertaForQuestionAnswering(BertModelWithHeadsAdaptersMixin, RobertaPreTra
             token_type_ids=token_type_ids,
             position_ids=position_ids,
             head_mask=head_mask,
+            ghr_mask = ghr_mask,
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
+        
+        
         sequence_output = outputs[0]
+        
+        ghr_in = sequence_output.permute(1, 0, 2) # [seq_len, bsz, hidden]
+        input_shape = ghr_in.size()[:-1]
+        seq_length = input_shape[1]
+        pos_ids = torch.arange(seq_length, dtype=torch.long, device=ghr_in.device)
+        pos_ids = pos_ids.unsqueeze(0).expand(input_shape)
+        pos_embedding = self.pe(pos_ids)
+        ghr_in = ghr_in + pos_embedding
+        ghr_in = self.LayerNorm(ghr_in)
+        ghr_in = self.dropout(ghr_in)
+
+        ghr_out = self.robertalayer(ghr_in, ghr_mask)
+        ghr_out = ghr_out[0].permute(1, 0, 2) #[bsz, seq_len, hidden]
+        sequence_output = torch.cat((sequence_output, ghr_out), dim=2)
+        
+        pooled_output = sequence_output[:, 0, :]
+        
 
         logits = self.qa_outputs(sequence_output)
         start_logits, end_logits = logits.split(1, dim=-1)
         start_logits = start_logits.squeeze(-1).contiguous()
         end_logits = end_logits.squeeze(-1).contiguous()
+        
+        
+        
+        
+        
+        start_probs = torch.nn.functional.softmax(start_logits, -1)
+        end_probs = torch.nn.functional.softmax(end_logits, -1)
+
+        no_answer_logits = self.no_answer(pooled_output)
+        yes_no_logits = self.yes_no(pooled_output)
+        follow_up_logits = self.follow_up(pooled_output)
+
+        no_answer_probs = self.sigmoid(no_answer_logits)
+        yes_no_probs = self.softmax(yes_no_logits)
+        follow_up_probs = self.softmax(follow_up_logits)
+        
+        
+        
 
         total_loss = None
         if start_positions is not None and end_positions is not None:
@@ -1584,10 +1677,25 @@ class RobertaForQuestionAnswering(BertModelWithHeadsAdaptersMixin, RobertaPreTra
             loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
             start_loss = loss_fct(start_logits, start_positions)
             end_loss = loss_fct(end_logits, end_positions)
-            total_loss = (start_loss + end_loss) / 2
+            
+            
+            bce_loss_fct = BCEWithLogitsLoss()
+            no_answer_loss = bce_loss_fct(no_answer_logits.squeeze(), no_answer.squeeze())
 
-        if not return_dict:
-            output = (start_logits, end_logits) + outputs[2:]
+            cross_loss_fct = CrossEntropyLoss(ignore_index=3)
+            yes_no_loss = cross_loss_fct(yes_no_logits, yes_no)
+            follow_up_loss = cross_loss_fct(follow_up_logits, follow_up)
+
+            total_loss = 0.7*(start_loss + end_loss) + 0.1*no_answer_loss + 0.1*yes_no_loss + 0.1*follow_up_loss
+
+        if return_dict:
+            output = (
+                      start_probs, 
+                      end_probs,
+                      no_answer_probs,
+                      yes_no_probs,
+                      follow_up_probs,
+                      ) + outputs[2:]
             return ((total_loss,) + output) if total_loss is not None else output
 
         return QuestionAnsweringModelOutput(
